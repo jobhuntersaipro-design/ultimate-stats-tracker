@@ -1,5 +1,6 @@
+// frontend/tailwind.config.js (Ensure this is present and accurate)
 /** @type {import('tailwindcss').Config} */
-export default {
+module.exports = { // Changed to module.exports for consistency
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
