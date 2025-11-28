@@ -71,7 +71,7 @@ const PitchMap: React.FC = () => {
   const [pendingLocation, setPendingLocation] = useState<Coordinate | null>(null);
   const [editingEventId, setEditingEventId] = useState<number | null>(null);
   
-  // NEW: Toggle for bottom bar stats
+  // Toggle for bottom bar stats
   const [showPlayerStats, setShowPlayerStats] = useState(false); 
 
   const [message, setMessage] = useState<string>("Select 7 players to start");
@@ -82,9 +82,9 @@ const PitchMap: React.FC = () => {
   const sortedRoster = useMemo(() => [...TEAM_ROSTER].sort((a, b) => a.number - b.number), [TEAM_ROSTER]);
   const sortedLineup = useMemo(() => [...lineup].sort((a, b) => a.number - b.number), [lineup]);
 
-  // --- Point Stats Calculation (Includes Avg Hold Time) ---
+  // --- Point Stats Calculation ---
   const pointPlayerStats = useMemo(() => {
-    const stats: { [key: string]: { passes: number, received: number, avg_hold_time: string, total_hold_time: number } } = {};
+    const stats: { [key: string]: { passes: number, received: number, assists: number, scores: number, avg_hold_time: string, total_hold_time: number } } = {};
 
     for (const player of TEAM_ROSTER) {
         const durations = playerHoldDurations[player.name] || [];
@@ -94,19 +94,39 @@ const PitchMap: React.FC = () => {
         stats[player.name] = { 
             passes: 0, 
             received: 0, 
+            assists: 0, 
+            scores: 0,
             avg_hold_time: avgHold,
             total_hold_time: totalHold
         };
     }
 
     for (const event of events) {
-        if (event.thrower_name && event.thrower_name !== 'Opponent' && (event.type === 'catch' || event.type === 'goal')) {
+        // ASSISTS & SCORES are tracked separately from Passes/Receives
+        
+        // ASSISTS (Thrower of a Goal)
+        if (event.type === 'goal' && event.thrower_name && event.thrower_name !== 'Opponent') {
+            if (stats[event.thrower_name]) {
+                stats[event.thrower_name].assists += 1;
+            }
+        }
+        
+        // SCORES (Receiver of a Goal)
+        if (event.type === 'goal') {
+             if (stats[event.player_name]) {
+                stats[event.player_name].scores += 1;
+             }
+        }
+
+        // PASSES (Any completed throw that wasn't an assist)
+        if (event.type === 'catch' && event.thrower_name && event.thrower_name !== 'Opponent') {
             if (stats[event.thrower_name]) {
                 stats[event.thrower_name].passes += 1;
             }
         }
         
-        if (event.type === 'catch' || event.type === 'goal') {
+        // RECEIVES (Any catch that wasn't a score)
+        if (event.type === 'catch') {
              if (stats[event.player_name]) {
                 stats[event.player_name].received += 1;
              }
@@ -115,7 +135,7 @@ const PitchMap: React.FC = () => {
     return stats;
   }, [events, playerHoldDurations]);
 
-  // --- Point Timer ---
+  // --- Point Timer (Same as before) ---
   useEffect(() => {
     let interval: any;
     if (pointStartTime && currentPossessor) { 
@@ -126,7 +146,7 @@ const PitchMap: React.FC = () => {
     return () => clearInterval(interval);
   }, [pointStartTime, currentPossessor]);
 
-  // --- Point Summary Calculation ---
+  // --- Point Summary Calculation (Same as before) ---
   const pointStats = useMemo(() => {
      const passes = events.filter(e => e.type === 'catch' || e.type === 'goal');
      const validPasses = passes.filter(e => (e.dist_meters || 0) > 0);
@@ -141,14 +161,14 @@ const PitchMap: React.FC = () => {
      };
   }, [events]);
 
-  // Auto-scroll log
+  // Auto-scroll log (Same as before)
   useEffect(() => {
     if (logContainerRef.current && !editingEventId) {
       logContainerRef.current.scrollTop = 0; 
     }
   }, [events, editingEventId]);
 
-  // --- Helpers ---
+  // --- Helpers (Same as before) ---
   const getCoordinates = (clientX: number, clientY: number): Coordinate => {
     if (!svgRef.current) return { x: 0, y: 0 };
     const CTM = svgRef.current.getScreenCTM();
@@ -198,7 +218,7 @@ const PitchMap: React.FC = () => {
     }
   };
 
-  // --- Handlers ---
+  // --- Handlers (Logic remains sound) ---
 
   const handleFieldClick = (e: React.MouseEvent<SVGSVGElement>) => {
     if (editingEventId) return;
@@ -280,6 +300,18 @@ const PitchMap: React.FC = () => {
 
     // PLAY MODE
 
+    // FIX 2: Deselect if same player is clicked during possession
+    if (currentPossessor && player.id === currentPossessor.id) {
+        if (pendingLocation) {
+             // Cancel the throw attempt (de-selects the disc)
+            setCurrentPossessor(currentPossessor); // Still possesses the disc
+            setPendingLocation(null);
+            setMessage(`Throw cancelled. Disc still with ${currentPossessor.name}. Drag to throw.`);
+            return;
+        }
+    }
+
+
     // 1. Pickup
     if (!currentPossessor && pendingLocation) {
         setPointStartTime(Date.now()); 
@@ -306,7 +338,6 @@ const PitchMap: React.FC = () => {
     if (currentPossessor && pendingLocation && activeThrowerLoc) {
         if (player.id === currentPossessor.id) return; 
 
-        // Record hold time for the CURRENT possessor (the thrower)
         recordHoldTime(currentPossessor);
         setPossessionAcquisitionTime(Date.now()); // Receiver starts new hold time
 
@@ -345,7 +376,6 @@ const PitchMap: React.FC = () => {
   const handleTurnover = () => {
     if (!pendingLocation || !currentPossessor) return;
 
-    // Record hold time for the CURRENT possessor (the player who turned it over)
     recordHoldTime(currentPossessor);
 
     const newEvent: EventLog = {
@@ -369,12 +399,31 @@ const PitchMap: React.FC = () => {
      alert("Stats synced!"); 
   };
 
+  // --- Card Helper Function ---
+  const getCardClasses = (player: Player, isClickable: boolean, isPossessor: boolean) => {
+      let base = "w-24 h-[120px] rounded-lg shadow-xl p-1 flex flex-col justify-start items-center transition-all duration-150 relative overflow-hidden text-white cursor-pointer select-none";
+      let background = "bg-gray-700/70 border border-gray-600";
+      let status = "";
+      
+      if (isPossessor) {
+          status = "ring-2 ring-yellow-400 shadow-[0_0_10px_#facc15] bg-yellow-900/40";
+      } else if (isClickable) {
+          status = "hover:bg-blue-900/50 hover:ring-2 ring-blue-400 bg-gray-800/70";
+      } else {
+          status = "opacity-30 grayscale pointer-events-none";
+      }
+
+      return `${base} ${background} ${status}`;
+  }
+
   return (
     <div className={`flex flex-col h-screen bg-gray-900 text-white overflow-hidden select-none ${editingEventId ? 'ring-4 ring-amber-500' : ''}`}>
       
       {/* HEADER */}
-      <div className={`p-2 shadow-md flex justify-between items-center z-10 shrink-0 border-b border-gray-700 ${editingEventId ? 'bg-amber-900/50' : 'bg-gray-800'}`}>
-        <div className="flex-1">
+      <div className={`p-2 shadow-md flex justify-start items-center z-10 shrink-0 border-b border-gray-700 ${editingEventId ? 'bg-amber-900/50' : 'bg-gray-800'}`}>
+        
+        {/* Left Status Message */}
+        <div className="flex-1 min-w-0">
           <p className="text-gray-400 text-xs font-bold uppercase">
              {editingEventId ? <span className="text-amber-400 animate-pulse">⚠ EDITING MODE</span> : "Game Status"}
           </p>
@@ -383,9 +432,33 @@ const PitchMap: React.FC = () => {
           </p>
         </div>
 
-        {/* Scoreboard controls... (omitted for brevity) */}
+        {/* FIX 3: Central Scoreboard */}
+        <div className="flex items-center justify-center gap-4 bg-gray-900 px-6 py-1 rounded-lg border border-gray-700 mx-4 shrink-0">
+            <div className="text-center">
+                <p className="text-[10px] text-gray-500 font-bold">HOME</p>
+                <div className="text-3xl font-bold text-white flex items-center gap-2">
+                    {homeScore}
+                    <div className="flex flex-col gap-0.5">
+                        <button onClick={() => setHomeScore(s => s + 1)} className="text-[8px] bg-gray-700 hover:bg-green-600 w-4 h-3 rounded flex items-center justify-center">▲</button>
+                        <button onClick={() => setHomeScore(s => Math.max(0, s - 1))} className="text-[8px] bg-gray-700 hover:bg-red-600 w-4 h-3 rounded flex items-center justify-center">▼</button>
+                    </div>
+                </div>
+            </div>
+            <div className="text-gray-600 font-bold text-3xl">:</div>
+            <div className="text-center">
+                <p className="text-[10px] text-gray-500 font-bold">AWAY</p>
+                <div className="text-3xl font-bold text-white flex items-center gap-2">
+                    {awayScore}
+                    <div className="flex flex-col gap-0.5">
+                        <button onClick={() => setAwayScore(s => s + 1)} className="text-[8px] bg-gray-700 hover:bg-green-600 w-4 h-3 rounded flex items-center justify-center">▲</button>
+                        <button onClick={() => setAwayScore(s => Math.max(0, s - 1))} className="text-[8px] bg-gray-700 hover:bg-red-600 w-4 h-3 rounded flex items-center justify-center">▼</button>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-        <div className="flex gap-2 flex-1 justify-end">
+
+        <div className="flex gap-2 justify-end shrink-0">
            {editingEventId ? (
              <button onClick={() => setEditingEventId(null)} className="bg-gray-600 px-4 py-2 rounded flex items-center gap-2 font-bold hover:bg-gray-500">
                 <XCircle size={16} /> Cancel
@@ -408,7 +481,7 @@ const PitchMap: React.FC = () => {
 
       <div className="flex flex-1 overflow-hidden">
         
-        {/* LEFT: Roster (Reverted to always show Roster/Lineup Selection) */}
+        {/* LEFT: Roster (Always show Roster/Lineup Selection) */}
         <div className={`w-20 md:w-56 bg-gray-800 border-r border-gray-700 flex flex-col overflow-y-auto shrink-0 hidden md:flex ${editingEventId ? 'opacity-50 pointer-events-none' : ''}`}>
           <div className="p-3 font-bold text-gray-400 uppercase text-xs border-b border-gray-700">Team Roster</div>
           {sortedRoster.map(player => {
@@ -468,20 +541,27 @@ const PitchMap: React.FC = () => {
             <rect x="0" y={FIELD_LENGTH - ENDZONE_DEPTH} width={FIELD_WIDTH} height={ENDZONE_DEPTH} fill="rgba(255,255,255,0.15)" />
             <line x1="0" y1={FIELD_LENGTH - ENDZONE_DEPTH} x2={FIELD_WIDTH} y2={FIELD_LENGTH - ENDZONE_DEPTH} stroke="white" strokeWidth="0.5" />
             
-            {/* Links & Players */}
+            {/* Markings: Center Hash Marks */}
+            <line x1="19" y1={ENDZONE_DEPTH + 20} x2="21" y2={ENDZONE_DEPTH + 20} stroke="white" strokeWidth="0.5" />
+            <line x1="19" y1={FIELD_LENGTH - ENDZONE_DEPTH - 20} x2="21" y2={FIELD_LENGTH - ENDZONE_DEPTH - 20} stroke="white" strokeWidth="0.5" />
+
+            {/* Links */}
             {events.map((evt, i) => {
               if (i === 0 || evt.type === 'turnover') return null;
               const prev = events[i - 1];
               if (!prev) return null;
               return <line key={`l-${evt.id}`} x1={prev.location.x} y1={prev.location.y} x2={evt.location.x} y2={evt.location.y} stroke="rgba(255,255,255,0.4)" strokeWidth="0.3" strokeDasharray="1,0.5" />;
             })}
+            
+            {/* Players */}
             {events.map((evt) => {
                const p = getPlayerDetails(evt.player_name);
+               if (!p) return null; 
                const isCur = currentPossessor?.name === evt.player_name && events[events.length-1].id === evt.id;
                const size = 3;
                return (
                 <g key={evt.id} opacity={isCur ? 1 : 0.6}>
-                  <image href={p ? getAvatar(p.gender) : ""} x={evt.location.x - size/2} y={evt.location.y - size/2} height={size} width={size} className="rounded-full" />
+                  <image href={getAvatar(p.gender)} x={evt.location.x - size/2} y={evt.location.y - size/2} height={size} width={size} className="rounded-full" />
                   <circle cx={evt.location.x} cy={evt.location.y} r={size/2} fill="none" stroke={evt.type === 'goal' ? 'gold' : 'white'} strokeWidth="0.2" />
                   <rect x={evt.location.x - 1.5} y={evt.location.y - size + 0.5} width="3" height="1.5" rx="0.5" fill="rgba(0,0,0,0.8)" />
                   <text x={evt.location.x} y={evt.location.y - size + 1.5} fontSize="1" fill="white" textAnchor="middle" fontWeight="bold">#{p?.number}</text>
@@ -506,7 +586,7 @@ const PitchMap: React.FC = () => {
           </svg>
         </div>
 
-        {/* RIGHT: Action Log */}
+        {/* RIGHT: Action Log (FIX 1: Restored Rendering) */}
         <div className={`w-36 md:w-64 bg-gray-800 border-l border-gray-700 flex flex-col shrink-0 ${editingEventId ? 'border-amber-500 border-l-4' : ''}`}>
             <div className="p-3 font-bold text-gray-400 uppercase text-xs border-b border-gray-700 flex items-center gap-2">
                 <ScrollText size={14} /> Action Log
@@ -535,7 +615,7 @@ const PitchMap: React.FC = () => {
                         bgClass = "bg-yellow-900/30 border-yellow-600";
                         icon = <Trophy size={12} className="text-yellow-400" />;
                         text = `GOAL! ${thrower?.name} ➝ ${p?.name}`;
-                        subtext = `Pass #${evt.pass_number} • ${evt.dist_meters}m`;
+                        subtext = `Assist (${thrower?.name}) • Score (${p?.name})`;
                     } else if (evt.type === 'turnover') {
                         bgClass = "bg-red-900/30 border-red-600";
                         text = `Turnover (${p?.name})`;
@@ -562,25 +642,26 @@ const PitchMap: React.FC = () => {
       </div>
 
       {/* BOTTOM BAR: Selection Area + Show Stats Toggle */}
-      <div className={`bg-gray-800 p-2 border-t border-gray-700 min-h-[100px] shrink-0 overflow-x-auto ${editingEventId ? 'bg-amber-950/30 border-t-2 border-amber-500' : ''}`}>
+      <div className={`bg-gray-800 p-2 border-t border-gray-700 min-h-[140px] shrink-0 overflow-x-auto ${editingEventId ? 'bg-amber-950/30 border-t-2 border-amber-500' : ''}`}>
         
         {lineup.length === 7 && (
-            <div className="flex justify-end p-2 md:p-0">
-                <button 
+            <div className="flex justify-start items-center gap-4 px-4 pt-1 pb-2">
+                 <button 
                     onClick={() => setShowPlayerStats(s => !s)}
-                    className="bg-gray-600 hover:bg-gray-500 text-xs text-white px-3 py-1 rounded flex items-center gap-1.5 transition-colors"
+                    className="bg-gray-600 hover:bg-gray-500 text-xs text-white px-3 py-1 rounded flex items-center gap-1.5 transition-colors shrink-0"
                 >
                     {showPlayerStats ? <EyeOff size={14} /> : <Eye size={14} />}
                     {showPlayerStats ? "Hide Stats" : "Show Stats"}
                 </button>
+                <span className="text-gray-400 text-xs truncate hidden sm:inline">Tap receiver to track completion. Drag from card to throw.</span>
             </div>
         )}
 
         {editingEventId ? (
              <div className="flex justify-start md:justify-center gap-4 min-w-max px-4">
-                <div className="flex flex-col justify-center items-center mr-4 text-amber-500 font-bold text-xs uppercase w-16 text-center">Correct to:</div>
+                <div className="flex flex-col justify-center items-center mr-4 text-amber-500 font-bold text-xs uppercase w-24 text-center">Correct to:</div>
                 {sortedLineup.map(player => (
-                    <div key={player.id} onClick={() => handlePlayerSelect(player)} className="flex flex-col items-center cursor-pointer active:scale-95 w-16 hover:bg-gray-700/50 rounded p-1">
+                    <div key={player.id} onClick={() => handlePlayerSelect(player)} className="flex flex-col items-center cursor-pointer active:scale-95 w-24 h-[120px] rounded-lg border-2 border-amber-500 bg-amber-900/40 p-2">
                         <span className="text-lg font-bold text-gray-200 leading-none mb-1">#{player.number}</span>
                         <img src={getAvatar(player.gender)} alt="" className="w-10 h-10 rounded-full border-2 border-amber-500 bg-gray-700" />
                         <span className="mt-1 text-xs truncate max-w-full font-medium text-amber-200">{player.name}</span>
@@ -594,43 +675,62 @@ const PitchMap: React.FC = () => {
                 <p className="text-sm">Select 7 players from left roster</p>
             </div>
             ) : (
-            <div className="flex justify-start md:justify-center gap-4 min-w-max px-4">
+            <div className="flex justify-start md:justify-center gap-2 min-w-max px-4">
                 {sortedLineup.map(player => {
                     const isPossessor = currentPossessor?.id === player.id;
-                    if (!currentPossessor && isPossessor) return null;
-                    if (currentPossessor && isPossessor && pendingLocation) return null; 
-
                     const isClickable = !!pendingLocation || !currentPossessor;
-                    const stats = pointPlayerStats[player.name] || { passes: 0, received: 0, avg_hold_time: '0.0' };
+                    const stats = pointPlayerStats[player.name] || { passes: 0, received: 0, assists: 0, scores: 0, avg_hold_time: '0.0' };
                     
+                    // Logic to hide the card only if a throw is mid-drag, NOT if a receiver is being selected
+                    const shouldRenderCard = !(isPossessor && isDragging); 
+                    if (!shouldRenderCard) return null;
+
+                    const cardClasses = getCardClasses(player, isClickable, isPossessor);
+
                     const handleClick = () => {
-                        if (!currentPossessor && !pendingLocation) {
+                        // FIX 2: Allow clicking the possessor to cancel the pending throw (if one exists)
+                        if (isPossessor && pendingLocation) {
+                             handlePlayerSelect(player); // This triggers the cancel logic in handlePlayerSelect
+                        }
+                        else if (!currentPossessor && !pendingLocation) {
+                            // Manual trigger of pickup/start event
                             setPendingLocation({x:20, y:100}); 
                             handlePlayerSelect(player);
-                        } else if (isClickable) {
+                        } else if (isClickable && !isPossessor) {
                             handlePlayerSelect(player);
                         }
                     };
                     
-                    const borderClass = isClickable ? 'border-gray-500' : 'border-gray-800';
-
                     return (
-                    <div key={player.id} onClick={handleClick} className={`flex flex-col items-center cursor-pointer active:scale-95 w-16 transition-all duration-200 ${isClickable ? 'opacity-100' : 'opacity-30 grayscale'} p-1 rounded`}>
-                        <span className="text-lg font-bold text-gray-200 leading-none mb-1">#{player.number}</span>
-                        <div className="relative p-1">
-                            <img src={getAvatar(player.gender)} alt="" className={`w-10 h-10 rounded-full border-2 ${borderClass} bg-gray-700`} />
+                    <div key={player.id} onClick={handleClick} className={cardClasses} style={isPossessor ? {boxShadow: '0 0 10px #facc15'} : {}}>
+                        
+                        {/* Player Header */}
+                        <div className="w-full flex items-center justify-between text-xs mb-1">
+                            <span className="text-xl font-black">#{player.number}</span>
+                            <span className="text-[10px] font-medium text-gray-300 truncate max-w-[60%] text-right">{player.name}</span>
                         </div>
                         
-                        <span className={`mt-1 text-xs truncate max-w-full font-medium ${isClickable ? 'text-gray-300' : 'text-gray-400'}`}>
-                            {player.name}
-                        </span>
+                        {/* Avatar */}
+                        <div className="flex-shrink-0 mb-1">
+                            <img src={getAvatar(player.gender)} alt="" className="w-9 h-9 rounded-full border-2 border-white/50 bg-gray-700" />
+                        </div>
                         
+                        {/* Status Marker (Possessor) */}
+                        {isPossessor && <div className="absolute top-1 left-1.5 w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></div>}
+
                         {/* CONDITIONAL STATS DISPLAY */}
-                        {showPlayerStats && (
-                            <div className="flex flex-col w-full text-[9px] text-gray-400 font-mono mt-0.5 px-1 font-bold bg-gray-700/50 rounded p-1">
-                                <span className="flex justify-between">P: <span className={stats.passes > 0 ? 'text-blue-400' : 'text-gray-300'}>{stats.passes}</span></span>
-                                <span className="flex justify-between">R: <span className={stats.received > 0 ? 'text-green-400' : 'text-gray-300'}>{stats.received}</span></span>
-                                <span className="flex justify-between">H: <span className={stats.avg_hold_time !== '0.0' ? 'text-yellow-400' : 'text-gray-300'}>{stats.avg_hold_time}s</span></span>
+                        {showPlayerStats ? (
+                            <div className="flex flex-col w-full text-[7px] font-mono font-bold mt-1 text-left pt-1 border-t border-gray-600/50">
+                                <span className="flex justify-between">#Passes: <span className={stats.passes > 0 ? 'text-blue-400' : 'text-gray-300'}>{stats.passes}</span></span>
+                                <span className="flex justify-between">#Receive: <span className={stats.received > 0 ? 'text-green-400' : 'text-gray-300'}>{stats.received}</span></span>
+                                <span className="flex justify-between">Avg. Hold: <span className={stats.avg_hold_time !== '0.0' ? 'text-yellow-400' : 'text-gray-300'}>{stats.avg_hold_time}s</span></span>
+                                <span className="flex justify-between">Assist: <span className={stats.assists > 0 ? 'text-purple-400' : 'text-gray-300'}>{stats.assists}</span></span>
+                                <span className="flex justify-between">Score: <span className={stats.scores > 0 ? 'text-red-400' : 'text-gray-300'}>{stats.scores}</span></span>
+                            </div>
+                        ) : (
+                            // Simple text label when stats are hidden
+                            <div className="absolute bottom-1 w-full text-center">
+                                <span className="text-[10px] font-medium text-gray-400">{isPossessor ? 'THROWER' : 'RECEIVER'}</span>
                             </div>
                         )}
                     </div>
