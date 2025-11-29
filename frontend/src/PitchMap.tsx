@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { Send, Users, RotateCcw, ScrollText, Trophy, Pencil, XCircle, Clock, Activity, Hash, Eye, EyeOff, SkipForward, Ban, CheckCircle, AlertTriangle, Hand, Network } from 'lucide-react';
+import { Send, Users, RotateCcw, ScrollText, Trophy, Pencil, XCircle, Clock, Activity, Hash, Eye, EyeOff, SkipForward, Ban, CheckCircle, AlertTriangle, Hand, Network, Shield, ShieldAlert } from 'lucide-react';
 
 // --- Types ---
 type Coordinate = { x: number; y: number };
@@ -14,9 +14,10 @@ type Player = {
 
 type EventLog = {
   id: number;
-  type: 'pull' | 'catch' | 'turnover' | 'goal';
+  type: 'pull' | 'catch' | 'turnover' | 'goal' | 'block' | 'opponent_turn' | 'opponent_score'; // Added defensive types
+  phase: 'offense' | 'defense'; // NEW: Track phase
   location: Coordinate;
-  player_name: string; // The primary actor (Red circle if turnover)
+  player_name: string; 
   thrower_name?: string; 
   intended_receiver_name?: string; 
   timestamp: string;
@@ -27,7 +28,6 @@ type EventLog = {
 
 // Storage for hold times: PlayerName -> [durations_in_seconds]
 type HoldDurations = { [playerName: string]: number[] };
-
 
 // --- Constants ---
 const FIELD_WIDTH = 40;
@@ -56,6 +56,9 @@ const PitchMap: React.FC = () => {
   const [lineup, setLineup] = useState<Player[]>([]);
   const [currentPossessor, setCurrentPossessor] = useState<Player | null>(null);
   
+  // NEW: Track Phase
+  const [currentPhase, setCurrentPhase] = useState<'offense' | 'defense'>('offense');
+
   // Current Point Events
   const [events, setEvents] = useState<EventLog[]>([]);
   const [matchHistory, setMatchHistory] = useState<EventLog[][]>([]);
@@ -108,7 +111,7 @@ const PitchMap: React.FC = () => {
     const stats: { 
         [key: string]: { 
             passes: number, received: number, assists: number, scores: number, turnovers: number,
-            throw_errors: number, drop_errors: number,
+            throw_errors: number, drop_errors: number, blocks: number, // NEW: blocks
             avg_hold_time: string, total_hold_time: number,
             total_dist: number, avg_dist: string,
             turnover_dist: number
@@ -138,7 +141,7 @@ const PitchMap: React.FC = () => {
 
         stats[player.name] = { 
             passes: 0, received: 0, assists: 0, scores: 0, turnovers: 0,
-            throw_errors: 0, drop_errors: 0,
+            throw_errors: 0, drop_errors: 0, blocks: 0,
             avg_hold_time: avgHold, total_hold_time: totalHold,
             total_dist: 0, avg_dist: "0.0", turnover_dist: 0
         };
@@ -173,6 +176,11 @@ const PitchMap: React.FC = () => {
         if (event.type === 'catch') {
              if (event.thrower_name && event.thrower_name !== 'Opponent' && stats[event.thrower_name]) stats[event.thrower_name].passes += 1;
              if (stats[event.player_name]) stats[event.player_name].received += 1;
+        }
+        
+        // Block Logic (NEW)
+        if (event.type === 'block') {
+            if (stats[event.player_name]) stats[event.player_name].blocks += 1;
         }
 
         // Turnover Logic
@@ -221,13 +229,14 @@ const PitchMap: React.FC = () => {
   useEffect(() => {
     let interval: any;
     const isPaused = showNextPointPrompt || isMatchFinished || showTurnoverTypePrompt || isSelectingDropper || isSelectingIntended;
-    if (pointStartTime && currentPossessor && !isPaused) { 
+    // Count time in both offense and defense (it's game time)
+    if (pointStartTime && !isPaused) { 
        interval = setInterval(() => {
          setElapsedTime(Math.floor((Date.now() - pointStartTime) / 1000));
        }, 1000);
     }
     return () => clearInterval(interval);
-  }, [pointStartTime, currentPossessor, showNextPointPrompt, isMatchFinished, showTurnoverTypePrompt, isSelectingDropper, isSelectingIntended]);
+  }, [pointStartTime, showNextPointPrompt, isMatchFinished, showTurnoverTypePrompt, isSelectingDropper, isSelectingIntended]);
 
   // --- Point Summary ---
   const pointStats = useMemo(() => {
@@ -300,6 +309,7 @@ const PitchMap: React.FC = () => {
       setPendingLocation(null);
       setPointStartTime(null); 
       setElapsedTime(0);
+      setCurrentPhase('offense'); // Default start
       setShowNextPointPrompt(false);
       setMessage("Start next point. Tap field for pull/pickup.");
   };
@@ -328,12 +338,13 @@ const PitchMap: React.FC = () => {
       setPlayerHoldDurations({});
       setCurrentPossessor(null); setPendingLocation(null);
       setPointStartTime(null); setElapsedTime(0);
+      setCurrentPhase('offense');
       setShowNextPointPrompt(false);
       setIsMatchFinished(false);
       setMessage("New Match Started");
   };
 
-  // --- TURNOVER LOGIC ---
+  // --- DEFENSE & TURNOVER LOGIC ---
 
   const initiateTurnoverSequence = () => {
       // Allow Dropped Pull (No possessor, start of point)
@@ -368,12 +379,10 @@ const PitchMap: React.FC = () => {
   const executeTurnover = (blamedPlayer: Player, type: 'throw' | 'receive', intendedReceiver: Player | null) => {
     if (!pendingLocation) return; 
 
-    // Don't record hold time if it's a dropped pull (no possession established)
     if (currentPossessor) {
         recordHoldTime(currentPossessor);
     }
     
-    // Dist is 0 if no active thrower (Dropped Pull)
     const dist = activeThrowerLoc ? calculateDistanceMeters(activeThrowerLoc, pendingLocation) : 0;
     
     const isDroppedPull = !currentPossessor && events.length === 0;
@@ -386,6 +395,7 @@ const PitchMap: React.FC = () => {
     const newEvent: EventLog = {
       id: Date.now(),
       type: 'turnover',
+      phase: 'offense', // The turnover ENDS the offensive phase, but technically belongs to it
       location: pendingLocation,
       player_name: blamedPlayer.name, 
       thrower_name: throwerNameVal, 
@@ -400,9 +410,31 @@ const PitchMap: React.FC = () => {
     setPendingLocation(null);
     setPossessionAcquisitionTime(null); 
     setPointStartTime(null); 
+    
+    // SWITCH TO DEFENSE
+    setCurrentPhase('defense');
+    
     setIsSelectingDropper(false);
     setIsSelectingIntended(false);
-    setMessage("Turnover! Tap field to set new start.");
+    setMessage("DEFENSE! Tap Player for Block (D) or Field for Opponent Turn.");
+  };
+
+  const handleOpponentScore = () => {
+      if (window.confirm("Confirm Opponent Scored?")) {
+        setAwayScore(s => s + 1);
+        const newEvent: EventLog = {
+            id: Date.now(),
+            type: 'opponent_score',
+            phase: 'defense',
+            location: {x: FIELD_WIDTH/2, y: isEndzone(0) ? 0 : FIELD_LENGTH}, // Generic location
+            player_name: 'Opponent',
+            timestamp: new Date().toISOString()
+        };
+        setEvents(prev => [...prev, newEvent]);
+        setPointStartTime(null);
+        setShowNextPointPrompt(true);
+        setMessage("Opponent Scored. Point Over.");
+      }
   };
 
 
@@ -416,9 +448,28 @@ const PitchMap: React.FC = () => {
 
     if (editingEventId || showNextPointPrompt || showMatchEndConfirm || isMatchFinished || showTurnoverTypePrompt || isSelectingDropper) return;
     if (lineup.length !== 7) { alert("Please select exactly 7 players first."); return; }
+    
+    const loc = getCoordinates(e.clientX, e.clientY);
+    
+    // DEFENSE MODE: Clicking field means Opponent Turnover (We get it back)
+    if (currentPhase === 'defense') {
+        const newEvent: EventLog = {
+            id: Date.now(),
+            type: 'opponent_turn',
+            phase: 'defense',
+            location: loc,
+            player_name: 'Opponent',
+            timestamp: new Date().toISOString()
+        };
+        setEvents(prev => [...prev, newEvent]);
+        setCurrentPhase('offense');
+        setPendingLocation(loc); // Disc is here now
+        setMessage("Opponent Turnover! Who picks it up?");
+        return;
+    }
+
     if (currentPossessor) return; 
 
-    const loc = getCoordinates(e.clientX, e.clientY);
     setPendingLocation(loc);
     setMessage("Who picked up the disc? (Select Player below)");
   };
@@ -479,6 +530,33 @@ const PitchMap: React.FC = () => {
         return;
     }
 
+    // --- DEFENSE MODE: BLOCK (D) ---
+    if (currentPhase === 'defense') {
+        const newEvent: EventLog = {
+            id: Date.now(),
+            type: 'block',
+            phase: 'defense',
+            location: { x: 20, y: 55 }, // Generic location for block, or could use prev pending? Keeping simple.
+            player_name: player.name,
+            timestamp: new Date().toISOString()
+        };
+        setEvents(prev => [...prev, newEvent]);
+        setCurrentPhase('offense');
+        // Player gets disc immediately
+        setPendingLocation({ x: 20, y: 55 }); // Center field default or need click? 
+        // Better UX: Block implies possession usually, or pickup. Let's say block -> pickup needed.
+        // Actually, let's make Block = We have disc, need to set location.
+        setPendingLocation(null);
+        setCurrentPossessor(player); // Simplification: Blocker picks it up? Or just turnover?
+        // Let's do: Block -> Turnover -> Pick up. 
+        // Revert: Block means they knocked it down. They might not have caught it.
+        // Let's just switch to offense and ask for location.
+        setCurrentPossessor(null);
+        setPendingLocation(null);
+        setMessage(`${player.name} got a Block! Tap field to set disc location.`);
+        return;
+    }
+
     // EDIT MODE LOGIC 
     if (editingEventId) {
         const index = events.findIndex(e => e.id === editingEventId);
@@ -502,9 +580,9 @@ const PitchMap: React.FC = () => {
 
     // 1. Pickup
     if (!currentPossessor && pendingLocation) {
-        setPointStartTime(Date.now()); 
+        if (!pointStartTime) setPointStartTime(Date.now()); 
         setPossessionAcquisitionTime(Date.now()); 
-        const newEvent: EventLog = { id: Date.now(), type: 'catch', location: pendingLocation, player_name: player.name, thrower_name: 'Opponent', timestamp: new Date().toISOString(), dist_meters: 0, pass_number: 0 };
+        const newEvent: EventLog = { id: Date.now(), type: 'catch', phase: 'offense', location: pendingLocation, player_name: player.name, thrower_name: 'Opponent', timestamp: new Date().toISOString(), dist_meters: 0, pass_number: 0 };
         setEvents(prev => [...prev, newEvent]);
         setCurrentPossessor(player);
         setPendingLocation(null);
@@ -527,6 +605,7 @@ const PitchMap: React.FC = () => {
         const newEvent: EventLog = {
             id: Date.now(),
             type: eventType,
+            phase: 'offense',
             location: pendingLocation,
             player_name: player.name,
             thrower_name: currentPossessor.name,
@@ -559,10 +638,13 @@ const PitchMap: React.FC = () => {
       let background = "bg-gray-700/70 border border-gray-600";
       let status = "";
       
-      // Disabled Check
       const isThrowerInSelectionMode = (isSelectingDropper || isSelectingIntended) && currentPossessor?.id === player.id;
 
-      if (isThrowerInSelectionMode) {
+      if (currentPhase === 'defense') {
+          // Defense styling
+          status = "hover:bg-blue-900/50 hover:ring-2 ring-blue-400 bg-gray-800/70 cursor-pointer";
+          background = "bg-red-900/20 border-red-800"; // Slight red tint for defense
+      } else if (isThrowerInSelectionMode) {
           status = "opacity-20 grayscale cursor-not-allowed border-red-900";
       } else if (isSelectingDropper) {
           status = "hover:bg-red-900/50 hover:ring-2 ring-red-400 bg-gray-800/70 cursor-crosshair";
@@ -579,14 +661,94 @@ const PitchMap: React.FC = () => {
       return `${base} ${background} ${status}`;
   }
 
+  // --- Render Log Helper ---
+  const renderActionLog = () => {
+    let lastPhase = '';
+    let phaseCount = 1; // Basic possession counter logic could go here
+
+    // We need to render in reverse order for the UI, but grouping requires knowing the order.
+    // Let's iterate forward to build groups, then render groups in reverse.
+    // Actually, simple visual separators based on prev index is easier.
+    
+    return events.slice().reverse().map((evt, index, arr) => {
+         const p = getPlayerDetails(evt.player_name);
+         const thrower = evt.thrower_name ? getPlayerDetails(evt.thrower_name) : null;
+         const isEditingThis = editingEventId === evt.id;
+         let bgClass = "bg-gray-700/50 border-gray-600";
+         let icon = <Send size={12} className="text-blue-400" />;
+         let text = ""; let subtext = "";
+         const receiverDisplay = getPlayerDisplay(p?.name);
+         const throwerDisplay = getPlayerDisplay(thrower?.name);
+
+         // Phase Header
+         let phaseHeader = null;
+         // Check if the NEXT event (chronologically previous) had a different phase
+         const nextEvt = arr[index + 1];
+         if (!nextEvt || nextEvt.phase !== evt.phase) {
+             const isDef = evt.phase === 'defense';
+             phaseHeader = (
+                 <div className={`text-[10px] font-bold uppercase tracking-widest text-center py-1 mt-2 mb-1 rounded ${isDef ? 'bg-red-900/50 text-red-200' : 'bg-green-900/50 text-green-200'}`}>
+                     {isDef ? '▲ Defense' : '▼ Offense'}
+                 </div>
+             );
+         }
+
+         if (evt.type === 'catch') {
+             if (thrower) { text = `${throwerDisplay} ➝ ${receiverDisplay}`; subtext = `Pass #${evt.pass_number} • ${evt.dist_meters}m`; } 
+             else { text = `${receiverDisplay} (Pickup)`; }
+         } else if (evt.type === 'goal') {
+             bgClass = "bg-yellow-900/30 border-yellow-600"; icon = <Trophy size={12} className="text-yellow-400" />;
+             text = `GOAL! ${throwerDisplay} ➝ ${receiverDisplay}`; subtext = `Assist (${throwerDisplay}) • Score (${receiverDisplay})`;
+         } else if (evt.type === 'turnover') {
+             bgClass = "bg-red-900/30 border-red-600"; 
+             if (evt.thrower_name === 'Opponent') {
+                 text = `Dropped Pull (${receiverDisplay})`;
+             } else if (evt.error_type === 'receive' && evt.thrower_name) {
+                  text = `${throwerDisplay} ➝ ${receiverDisplay} (Drop)`;
+             } else if (evt.error_type === 'throw' && evt.intended_receiver_name) {
+                  text = `${getPlayerDisplay(evt.player_name)} ➝ ${getPlayerDisplay(evt.intended_receiver_name)} (Throw Err)`;
+             } else {
+                  const typeText = evt.error_type === 'throw' ? 'Throw Err' : 'Turnover';
+                  text = `${typeText} (${receiverDisplay})`;
+             }
+         } else if (evt.type === 'block') {
+             bgClass = "bg-blue-900/30 border-blue-500"; icon = <Shield size={12} className="text-blue-400" />;
+             text = `BLOCK (D) by ${receiverDisplay}`;
+         } else if (evt.type === 'opponent_turn') {
+             bgClass = "bg-green-900/30 border-green-500"; icon = <RotateCcw size={12} className="text-green-400" />;
+             text = "Opponent Turnover";
+         } else if (evt.type === 'opponent_score') {
+             bgClass = "bg-red-950 border-red-600"; icon = <Ban size={12} className="text-red-500" />;
+             text = "Opponent Goal";
+         }
+         
+         if (isEditingThis) bgClass = "bg-amber-900/60 border-amber-400 border-2";
+
+         return (
+             <React.Fragment key={evt.id}>
+                 <div className={`p-2 rounded border text-xs relative group ${bgClass}`}>
+                     <div className="flex items-center gap-2 mb-1 justify-between">
+                         <div className="flex items-center gap-2">{icon}<span className="text-gray-400 font-mono text-[10px]">{evt.timestamp.split('T')[1].slice(0,5)}</span></div>
+                         {evt.type !== 'opponent_score' && <button onClick={(e) => { e.stopPropagation(); setEditingEventId(evt.id); }} className="text-gray-400 hover:text-white hover:bg-gray-600 p-1 rounded" title="Edit Player"><Pencil size={10} /></button>}
+                     </div>
+                     <div className="font-medium text-gray-200">{text}</div>
+                     {subtext && <div className="text-[10px] text-gray-400 mt-0.5">{subtext}</div>}
+                 </div>
+                 {phaseHeader}
+             </React.Fragment>
+         );
+    });
+  }
+
   return (
     <div className={`flex flex-col h-screen bg-gray-900 text-white overflow-hidden select-none ${editingEventId ? 'ring-4 ring-amber-500' : ''}`}>
       
       {/* HEADER */}
       <div className={`p-2 shadow-md flex justify-between items-center z-10 shrink-0 border-b border-gray-700 relative ${editingEventId ? 'bg-amber-900/50' : 'bg-gray-800'}`}>
         <div className="flex-1 min-w-0">
-          <p className="text-gray-400 text-xs font-bold uppercase">
+          <p className="text-gray-400 text-xs font-bold uppercase flex items-center gap-2">
              {editingEventId ? <span className="text-amber-400 animate-pulse">⚠ EDITING MODE</span> : "Game Status"}
+             {currentPhase === 'defense' && !isMatchFinished && <span className="bg-red-600 text-white px-1.5 rounded text-[10px] animate-pulse">DEFENSE</span>}
           </p>
           <p className="text-yellow-400 text-sm font-mono truncate">
             {editingEventId ? "Select the CORRECT player from the list below" : message}
@@ -629,7 +791,15 @@ const PitchMap: React.FC = () => {
            ) : (
              !isMatchFinished && (
                 <>
-                    {pendingLocation && <button onClick={initiateTurnoverSequence} className="bg-red-600 px-3 py-1.5 rounded font-bold animate-pulse text-xs">TURN</button>}
+                    {/* Opponent Score Button (Visible in Defense) */}
+                    {currentPhase === 'defense' && (
+                         <button onClick={handleOpponentScore} className="bg-red-900/80 hover:bg-red-800 border border-red-500 px-2 py-1.5 rounded flex items-center gap-1 text-[10px] font-bold text-red-100">
+                             Opp. Goal
+                         </button>
+                    )}
+                    
+                    {currentPhase === 'offense' && pendingLocation && <button onClick={initiateTurnoverSequence} className="bg-red-600 px-3 py-1.5 rounded font-bold animate-pulse text-xs">TURN</button>}
+                    
                     <button onClick={submitStats} className="bg-blue-600 px-3 py-1.5 rounded flex gap-2 items-center text-xs"><Send size={14} /> Send</button>
                     <button onClick={resetMatch} className="bg-gray-600 px-3 py-1.5 rounded"><RotateCcw size={14} /></button>
                 </>
@@ -656,18 +826,18 @@ const PitchMap: React.FC = () => {
                                 <th className="p-3">Player</th>
                                 <th className="p-3 text-center">Goals</th>
                                 <th className="p-3 text-center">Assists</th>
+                                <th className="p-3 text-center">Blocks</th>
                                 <th className="p-3 text-center">Passes</th>
                                 <th className="p-3 text-center">Catches</th>
                                 <th className="p-3 text-center text-red-400">Throw Err</th>
                                 <th className="p-3 text-center text-red-400">Drop Err</th>
                                 <th className="p-3 text-right">Tot. Dist</th>
-                                <th className="p-3 text-right text-red-400">Turn Dist</th>
                             </tr>
                         </thead>
                         <tbody>
                             {sortedRoster.map(player => {
                                 const stats = matchData.playerStats[player.name];
-                                const hasStats = stats.passes + stats.received + stats.scores + stats.assists + stats.turnovers > 0;
+                                const hasStats = stats.passes + stats.received + stats.scores + stats.assists + stats.turnovers + stats.blocks > 0;
                                 return (
                                     <tr key={player.id} className={`border-b border-gray-700/50 hover:bg-gray-700/30 ${hasStats ? 'text-white' : 'text-gray-500'}`}>
                                         <td className="p-3 font-medium flex items-center gap-2">
@@ -676,12 +846,12 @@ const PitchMap: React.FC = () => {
                                         </td>
                                         <td className={`p-3 text-center ${stats.scores > 0 ? 'text-green-400 font-bold' : ''}`}>{stats.scores}</td>
                                         <td className={`p-3 text-center ${stats.assists > 0 ? 'text-purple-400 font-bold' : ''}`}>{stats.assists}</td>
+                                        <td className={`p-3 text-center ${stats.blocks > 0 ? 'text-blue-400 font-bold' : ''}`}>{stats.blocks}</td>
                                         <td className="p-3 text-center">{stats.passes}</td>
                                         <td className="p-3 text-center">{stats.received}</td>
                                         <td className="p-3 text-center">{stats.throw_errors}</td>
                                         <td className="p-3 text-center">{stats.drop_errors}</td>
                                         <td className="p-3 text-right font-mono">{stats.total_dist.toFixed(0)}m</td>
-                                        <td className="p-3 text-right font-mono text-red-400">{stats.turnover_dist.toFixed(0)}m</td>
                                     </tr>
                                 );
                             })}
@@ -826,11 +996,21 @@ const PitchMap: React.FC = () => {
                         </div>
                     </div>
                 )}
+                
+                {/* DEFENSE OVERLAY HINT */}
+                {currentPhase === 'defense' && !showTurnoverTypePrompt && !showNextPointPrompt && !showMatchEndConfirm && (
+                    <div className="absolute top-20 left-1/2 -translate-x-1/2 z-10 pointer-events-none opacity-50">
+                        <div className="flex flex-col items-center">
+                             <ShieldAlert size={64} className="text-red-500 animate-pulse" />
+                             <span className="text-red-500 font-black text-xl tracking-widest uppercase mt-2">DEFENSE</span>
+                        </div>
+                    </div>
+                )}
 
                 <svg
                     ref={svgRef}
                     viewBox={`0 0 ${FIELD_WIDTH} ${FIELD_LENGTH}`}
-                    className="h-full w-auto max-w-full bg-green-700 cursor-crosshair shadow-2xl border-2 border-white"
+                    className={`h-full w-auto max-w-full cursor-crosshair shadow-2xl border-2 transition-colors duration-500 ${currentPhase === 'defense' ? 'bg-red-950/40 border-red-900' : 'bg-green-700 border-white'}`}
                     onClick={handleFieldClick}
                     onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
                     onTouchStart={handleMouseDown} onTouchMove={handleMouseMove} onTouchEnd={handleMouseUp}
@@ -844,23 +1024,39 @@ const PitchMap: React.FC = () => {
                     <line x1="19" y1={FIELD_LENGTH - ENDZONE_DEPTH - 20} x2="21" y2={FIELD_LENGTH - ENDZONE_DEPTH - 20} stroke="white" strokeWidth="0.5" />
 
                     {events.map((evt, i) => {
-                    if (i === 0) return null; // Removed turnover exclusion here
+                    if (i === 0) return null; 
                     const prev = events[i - 1];
                     if (!prev) return null;
                     
                     const lineColor = evt.type === 'turnover' ? 'red' : 'rgba(255,255,255,0.4)';
                     const lineOpacity = evt.type === 'turnover' ? 0.8 : 0.4;
                     
+                    // Don't draw line for opponent turn/score events if they break continuity visual
+                    if (evt.type === 'opponent_score' || evt.type === 'opponent_turn') return null;
+
                     return <line key={`l-${evt.id}`} x1={prev.location.x} y1={prev.location.y} x2={evt.location.x} y2={evt.location.y} stroke={lineColor} strokeWidth="0.3" strokeDasharray="1,0.5" opacity={lineOpacity} />;
                     })}
                     
                     {events.map((evt) => {
+                    if (evt.type === 'opponent_score') return null;
                     const p = getPlayerDetails(evt.player_name);
-                    if (!p) return null; 
+                    const isOpponent = evt.player_name === 'Opponent';
+                    
+                    // If simple point history, show dots.
                     const isCur = currentPossessor?.name === evt.player_name && events[events.length-1].id === evt.id;
                     const size = 3;
-                    
                     const strokeColor = evt.type === 'goal' ? 'gold' : evt.type === 'turnover' ? 'red' : 'white';
+                    
+                    if (isOpponent) {
+                        return (
+                             <g key={evt.id}>
+                                 <circle cx={evt.location.x} cy={evt.location.y} r={1.5} fill="red" opacity="0.5" />
+                                 <XCircle x={evt.location.x - 1.5} y={evt.location.y - 1.5} size={3} color="red" />
+                             </g>
+                        );
+                    }
+                    
+                    if (!p) return null;
 
                     return (
                         <g key={evt.id} opacity={isCur ? 1 : 0.6}>
@@ -888,51 +1084,9 @@ const PitchMap: React.FC = () => {
                 {/* RIGHT: Action Log */}
                 <div className={`w-36 md:w-64 bg-gray-800 border-l border-gray-700 flex flex-col shrink-0 ${editingEventId ? 'border-amber-500 border-l-4' : ''}`}>
                     <div className="p-3 font-bold text-gray-400 uppercase text-xs border-b border-gray-700 flex items-center gap-2"><ScrollText size={14} /> Action Log</div>
-                    <div className="flex-1 overflow-y-auto p-2 space-y-2 flex flex-col-reverse" ref={logContainerRef}>
+                    <div className="flex-1 overflow-y-auto p-2 space-y-0 flex flex-col-reverse" ref={logContainerRef}>
                         {events.length === 0 && <p className="text-gray-500 text-xs italic text-center mt-4">No events yet.</p>}
-                        {events.map((evt) => {
-                            const p = getPlayerDetails(evt.player_name);
-                            const thrower = evt.thrower_name ? getPlayerDetails(evt.thrower_name) : null;
-                            const isEditingThis = editingEventId === evt.id;
-                            let bgClass = "bg-gray-700/50 border-gray-600";
-                            let icon = <Send size={12} className="text-blue-400" />;
-                            let text = ""; let subtext = "";
-                            const receiverDisplay = getPlayerDisplay(p?.name);
-                            const throwerDisplay = getPlayerDisplay(thrower?.name);
-
-                            if (evt.type === 'catch') {
-                                if (thrower) { text = `${throwerDisplay} ➝ ${receiverDisplay}`; subtext = `Pass #${evt.pass_number} • ${evt.dist_meters}m`; } 
-                                else { text = `${receiverDisplay} (Pickup)`; }
-                            } else if (evt.type === 'goal') {
-                                bgClass = "bg-yellow-900/30 border-yellow-600"; icon = <Trophy size={12} className="text-yellow-400" />;
-                                text = `GOAL! ${throwerDisplay} ➝ ${receiverDisplay}`; subtext = `Assist (${throwerDisplay}) • Score (${receiverDisplay})`;
-                            } else if (evt.type === 'turnover') {
-                                bgClass = "bg-red-900/30 border-red-600"; 
-                                
-                                if (evt.thrower_name === 'Opponent') {
-                                    text = `Dropped Pull (${receiverDisplay})`;
-                                } else if (evt.error_type === 'receive' && evt.thrower_name) {
-                                     text = `${throwerDisplay} ➝ ${receiverDisplay} (Drop)`;
-                                } else if (evt.error_type === 'throw' && evt.intended_receiver_name) {
-                                     text = `${getPlayerDisplay(evt.player_name)} ➝ ${getPlayerDisplay(evt.intended_receiver_name)} (Throw Err)`;
-                                } else {
-                                     const typeText = evt.error_type === 'throw' ? 'Throw Err' : 'Turnover';
-                                     text = `${typeText} (${receiverDisplay})`;
-                                }
-                            }
-                            if (isEditingThis) bgClass = "bg-amber-900/60 border-amber-400 border-2";
-
-                            return (
-                                <div key={evt.id} className={`p-2 rounded border text-xs relative group ${bgClass}`}>
-                                    <div className="flex items-center gap-2 mb-1 justify-between">
-                                        <div className="flex items-center gap-2">{icon}<span className="text-gray-400 font-mono text-[10px]">{evt.timestamp.split('T')[1].slice(0,5)}</span></div>
-                                        <button onClick={(e) => { e.stopPropagation(); setEditingEventId(evt.id); }} className="text-gray-400 hover:text-white hover:bg-gray-600 p-1 rounded" title="Edit Player"><Pencil size={10} /></button>
-                                    </div>
-                                    <div className="font-medium text-gray-200">{text}</div>
-                                    {subtext && <div className="text-[10px] text-gray-400 mt-0.5">{subtext}</div>}
-                                </div>
-                            );
-                        })}
+                        {renderActionLog()}
                     </div>
                 </div>
             </>
@@ -950,6 +1104,7 @@ const PitchMap: React.FC = () => {
                     <span className="text-gray-400 text-xs truncate hidden sm:inline">
                         {isSelectingDropper ? <span className="text-red-400 font-bold animate-pulse">⚠ SELECT PLAYER WHO DROPPED THE DISC</span> : 
                          isSelectingIntended ? <span className="text-amber-400 font-bold animate-pulse">⚠ SELECT INTENDED RECEIVER (OR TAP FIELD IF NONE)</span> :
+                         currentPhase === 'defense' ? <span className="text-blue-300 font-bold">DEFENSE MODE: Tap Player for Block (D)</span> :
                         "Tap receiver to track completion. Drag from card to throw."}
                     </span>
                 </div>
@@ -972,15 +1127,15 @@ const PitchMap: React.FC = () => {
                 <div className="flex justify-start md:justify-center gap-2 min-w-max px-4">
                     {sortedLineup.map(player => {
                         const isPossessor = currentPossessor?.id === player.id;
-                        const isClickable = !!pendingLocation || !currentPossessor || isSelectingDropper || isSelectingIntended;
-                        const stats = pointData.playerStats[player.name] || { passes: 0, received: 0, assists: 0, scores: 0, avg_hold_time: '0.0', total_dist: 0, avg_dist: '0.0', turnover_dist: 0 };
+                        const isClickable = !!pendingLocation || !currentPossessor || isSelectingDropper || isSelectingIntended || currentPhase === 'defense';
+                        const stats = pointData.playerStats[player.name] || { passes: 0, received: 0, assists: 0, scores: 0, avg_hold_time: '0.0', total_dist: 0, avg_dist: '0.0', turnover_dist: 0, blocks: 0 };
                         
                         const shouldRenderCard = !(isPossessor && isDragging) || isSelectingDropper || isSelectingIntended; 
                         if (!shouldRenderCard) return null;
 
                         const cardClasses = getCardClasses(player, isClickable, isPossessor);
                         const handleClick = () => {
-                            if (isSelectingDropper || isSelectingIntended) { handlePlayerSelect(player); return; }
+                            if (isSelectingDropper || isSelectingIntended || currentPhase === 'defense') { handlePlayerSelect(player); return; }
 
                             if (isPossessor && pendingLocation) { handlePlayerSelect(player); }
                             else if (!currentPossessor && !pendingLocation) { setPendingLocation({x:20, y:100}); handlePlayerSelect(player); } 
@@ -997,7 +1152,7 @@ const PitchMap: React.FC = () => {
                                     <span className="flex justify-between">#Receive: <span className={stats.received > 0 ? 'text-green-400' : 'text-gray-300'}>{stats.received}</span></span>
                                     <span className="flex justify-between">Assist: <span className={stats.assists > 0 ? 'text-purple-400' : 'text-gray-300'}>{stats.assists}</span></span>
                                     <span className="flex justify-between">Score: <span className={stats.scores > 0 ? 'text-red-400' : 'text-gray-300'}>{stats.scores}</span></span>
-                                    <span className="flex justify-between">Total Dist: <span className={stats.total_dist > 0 ? 'text-cyan-400' : 'text-gray-300'}>{stats.total_dist.toFixed(0)}m</span></span>
+                                    <span className="flex justify-between">Block (D): <span className={stats.blocks > 0 ? 'text-blue-400' : 'text-gray-300'}>{stats.blocks}</span></span>
                                     <span className="flex justify-between">Turn Dist: <span className={stats.turnover_dist > 0 ? 'text-red-400' : 'text-gray-300'}>{stats.turnover_dist.toFixed(0)}m</span></span>
                                     <span className="flex justify-between">Avg. Hold: <span className={stats.avg_hold_time !== '0.0' ? 'text-yellow-400' : 'text-gray-300'}>{stats.avg_hold_time}s</span></span>
                                 </div>
@@ -1006,6 +1161,7 @@ const PitchMap: React.FC = () => {
                                     <span className="text-[10px] font-medium text-gray-400">
                                         {isSelectingDropper ? 'TAP IF DROPPED' : 
                                          isSelectingIntended ? 'TAP INTENDED' :
+                                         currentPhase === 'defense' ? 'TAP FOR BLOCK' :
                                          isPossessor ? 'THROWER' : 'RECEIVER'}
                                     </span>
                                 </div>
